@@ -5,6 +5,7 @@
 Генерує:
 - gpv-all-today.png для сьогоднішньої дати
 - gpv-all-tomorrow.png для завтрашньої дати (якщо є)
+Видаляє gpv-all-tomorrow.png якщо графіку на завтра немає
 """
 import json
 from pathlib import Path
@@ -85,6 +86,24 @@ def pick_font(size, bold=False):
             return ImageFont.load_default()
         except Exception:
             return None
+
+# --- Видалення зображення tomorrow якщо воно не потрібне ---
+def cleanup_tomorrow_image(generated_files: list):
+    """
+    Видаляє gpv-all-tomorrow.png якщо його немає в списку згенерованих файлів
+    
+    Args:
+        generated_files: список назв файлів, які було згенеровано
+    """
+    tomorrow_file = OUT_DIR / "gpv-all-tomorrow.png"
+    
+    # Якщо файл існує, але не був згенерований в цій сесії
+    if tomorrow_file.exists() and "gpv-all-tomorrow.png" not in generated_files:
+        try:
+            tomorrow_file.unlink()
+            log(f"🗑️ Видалено застаріле зображення: {tomorrow_file}")
+        except Exception as e:
+            log(f"⚠️ Помилка при видаленні {tomorrow_file}: {e}")
 
 # --- Визначення дат для генерації ---
 def get_dates_to_generate(fact_data: dict) -> list:
@@ -185,72 +204,75 @@ def get_description_for_state(state: str, preset: dict) -> str:
     return time_type.get(state, descriptions.get(state, "Невідомий стан"))
 
 # --- Функція для малювання розділеної клітинки ---
-def draw_split_cell(draw, x0: int, y0: int, x1: int, y1: int, state: str, prev_state: str, next_state: str, outline_color: tuple):
-    cell_width = x1 - x0
-    half_width = cell_width // 2
-    
-    if state == "no":
-        left_color = right_color = OUTAGE_COLOR
+def draw_split_cell(draw, x0, y0, x1, y1, state, prev_state, next_state):
+    half = (x1 - x0) // 2
+
+    if state == "yes":
+        left = right = AVAILABLE_COLOR
+
+    elif state == "no":
+        left = right = OUTAGE_COLOR
+
     elif state == "maybe":
-        left_color = right_color = POSSIBLE_COLOR
-    elif state == "yes":
-        left_color = right_color = AVAILABLE_COLOR
+        left = right = POSSIBLE_COLOR
+
     elif state == "first":
-        left_color = OUTAGE_COLOR
-        if next_state == "no":
-            right_color = OUTAGE_COLOR
-        elif next_state == "maybe":
-            right_color = POSSIBLE_COLOR
-        elif next_state in ["first", "mfirst"]:
-            right_color = OUTAGE_COLOR if next_state == "first" else POSSIBLE_COLOR
-        elif next_state in ["second", "msecond"]:
-            right_color = AVAILABLE_COLOR
-        else:
-            right_color = AVAILABLE_COLOR
+        left = OUTAGE_COLOR
+        right = OUTAGE_COLOR if next_state in ["no", "second"] else AVAILABLE_COLOR
+
     elif state == "second":
-        right_color = OUTAGE_COLOR
-        if prev_state == "no":
-            left_color = OUTAGE_COLOR
-        elif prev_state == "maybe":
-            left_color = POSSIBLE_COLOR
-        elif prev_state in ["second", "msecond"]:
-            left_color = OUTAGE_COLOR if prev_state == "second" else POSSIBLE_COLOR
-        elif prev_state in ["first", "mfirst"]:
-            left_color = AVAILABLE_COLOR
-        else:
-            left_color = AVAILABLE_COLOR
+        right = OUTAGE_COLOR
+        left = OUTAGE_COLOR if prev_state in ["no", "second"] else AVAILABLE_COLOR
+
+    # =======================
+    # ✅ mfirst (КІНЕЦЬ ДОБИ)
+    # =======================
     elif state == "mfirst":
-        left_color = POSSIBLE_COLOR
-        if next_state == "no":
-            right_color = OUTAGE_COLOR
-        elif next_state == "maybe":
-            right_color = POSSIBLE_COLOR
-        elif next_state in ["first", "mfirst"]:
-            right_color = OUTAGE_COLOR 
-        elif next_state in ["second", "msecond"]:
-            right_color = OUTAGE_COLOR
+        left = POSSIBLE_COLOR
+        if next_state is not None:
+            if next_state in ["no", "second"]:
+                right = OUTAGE_COLOR
+            elif next_state in ["maybe", "msecond"]:
+                right = POSSIBLE_COLOR
+            else:
+                right = AVAILABLE_COLOR
         else:
-            right_color = AVAILABLE_COLOR
+            # остання година доби → друга половина аналізується за станом попередньої години
+            if prev_state in ["no", "second", "first"]:
+                right = AVAILABLE_COLOR
+            else:
+                right = OUTAGE_COLOR
+            #right = AVAILABLE_COLOR
+
+    # =======================
+    # ✅ msecond (ПОЧАТОК ДОБИ)
+    # =======================
     elif state == "msecond":
-        right_color = POSSIBLE_COLOR
-        if prev_state == "no":
-            left_color = OUTAGE_COLOR
-        elif prev_state == "maybe":
-            left_color = POSSIBLE_COLOR
-        elif prev_state in ["second", "msecond"]:
-            left_color = OUTAGE_COLOR
-        elif prev_state in ["first", "mfirst"]:
-            left_color = OUTAGE_COLOR 
+        right = POSSIBLE_COLOR
+        if prev_state is not None:
+            if prev_state in ["no", "second"]:
+                left = OUTAGE_COLOR
+            elif prev_state in ["maybe", "mfirst"]:
+                left = POSSIBLE_COLOR
+            else:
+                left = AVAILABLE_COLOR
         else:
-            left_color = AVAILABLE_COLOR
+            # перша година доби → перша половина аналізується за станом наступної години
+            if next_state in ["no", "second", "first"]:
+                left = AVAILABLE_COLOR
+            else:
+                left = OUTAGE_COLOR            
+
     else:
-        left_color = right_color = AVAILABLE_COLOR
-    
-    if left_color == right_color:
-        draw.rectangle([x0, y0, x1, y1], fill=left_color, outline=outline_color)
+        left = right = AVAILABLE_COLOR
+
+    # --- Малювання ---
+    if left == right:
+        draw.rectangle([x0, y0, x1, y1], fill=left, outline=GRID_COLOR)
     else:
-        draw.rectangle([x0, y0, x0 + half_width, y1], fill=left_color)
-        draw.rectangle([x0 + half_width, y0, x1, y1], fill=right_color)
+        draw.rectangle([x0, y0, x0 + half, y1], fill=left)
+        draw.rectangle([x0 + half, y0, x1, y1], fill=right)
+        draw.rectangle([x0, y0, x1, y1], outline=GRID_COLOR)
 
 # --- Основна функція рендерингу ---
 def render_single_date(data: dict, day_ts: int, day_key: str, output_filename: str, date_str: str):
@@ -349,15 +371,24 @@ def render_single_date(data: dict, day_ts: int, day_key: str, output_filename: s
             h_key = str(h + 1)
             state = gp_hours.get(h_key, "yes")
             
-            prev_h_key = str(h) if h > 0 else "24"
-            next_h_key = str(h + 2) if h < 23 else "1"
-            prev_state = gp_hours.get(prev_h_key, "yes")
-            next_state = gp_hours.get(next_h_key, "yes")
+            #prev_h_key = str(h) if h > 0 else "24"
+            #next_h_key = str(h + 2) if h < 23 else "1"
+            #prev_state = gp_hours.get(prev_h_key, "yes")
+            #next_state = gp_hours.get(next_h_key, "yes")
+
+            prev_h_key = str(h) if h > 0 else None
+            next_h_key = str(h + 2) if h < 23 else None            
+            #prev_state = gp_hours.get(prev_h_key, "yes") if prev_h_key else "yes"
+            #next_state = gp_hours.get(next_h_key, "yes") if next_h_key else "yes"
+            prev_state = gp_hours.get(prev_h_key) if prev_h_key else None
+            next_state = gp_hours.get(next_h_key) if next_h_key else None
+
+
             
             x0h = table_x0 + LEFT_COL_W + h*CELL_W
             x1h = x0h + CELL_W
             
-            draw_split_cell(draw, x0h, y0, x1h, y1, state, prev_state, next_state, GRID_COLOR)
+            draw_split_cell(draw, x0h, y0, x1h, y1, state, prev_state, next_state)
 
     # --- Лінії сітки ---
     for i in range(0, 25):
@@ -412,10 +443,17 @@ def render(data: dict, json_path: Path):
     
     log(f"📅 Буде згенеровано {len(dates_to_generate)} зображень(я)")
     
+    # Список згенерованих файлів
+    generated_files = []
+    
     # Генеруємо зображення для кожної дати
     for day_ts, day_key, filename, date_str in dates_to_generate:
         log(f"🖼️ Генерую {filename} для дати {date_str}")
         render_single_date(data, day_ts, day_key, filename, date_str)
+        generated_files.append(filename)
+    
+    # Видаляємо tomorrow якщо його не було згенеровано
+    cleanup_tomorrow_image(generated_files)
 
 def generate_from_json(json_path):
     path = Path(json_path)
