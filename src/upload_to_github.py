@@ -1,33 +1,12 @@
 #!/usr/bin/env python3
 import os
 import shutil
-import subprocess
-import json
 from datetime import datetime
-from zoneinfo import ZoneInfo
-from pathlib import Path
-
-# ----------------- Налаштування -----------------
-REGION = "Kharkivoblenerho"   # <<<<<<<<<<<<<<<<<< ОБЛЕНЕРГО
-BASE_DIR = Path(__file__).parent.parent.absolute()
-
-#SOURCE_JSON = os.path.join(BASE_DIR, "out", f"{REGION}.json")
-SOURCE_JSON = os.path.join(BASE_DIR, "out", "Kharkivoblenerho.json")
-SOURCE_IMAGES = os.path.join(BASE_DIR, "out/images")
-
-# ----------------- ПРАВИЛЬНИЙ REPO -----------------
-REPO_DIR = "/home/yaroslav/bots/OE_OUTAGE_DATA"
-
-DATA_DIR = os.path.join(REPO_DIR, "data") # папка для json файлів
-IMAGES_DIR = os.path.join(REPO_DIR, f"images/{REGION}") # папка для зображень цього регіону
-#METADATA_FILE = os.path.join(DATA_DIR, f"last_updated_{REGION}.json")
-
-LOG_FILE = os.path.join(BASE_DIR, "logs", "full_log.log")
-
+from config import REGION, SOURCE_JSON, SOURCE_IMAGES, REPO_DIR, DATA_DIR, IMAGES_DIR, LOG_FILE, TIMEZONE
 
 def log(message):
-    timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%Y-%m-%d %H:%M:%S")
-    text = f"{timestamp} [upload_to_github_new] {message}"
+    timestamp = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    text = f"{timestamp} [upload_to_github] {message}"
     print(text)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -63,43 +42,37 @@ def run_upload():
     else:
         log("⚠️ Папка з новими зображеннями не знайдена")
 
-    # ------------------- last_updated -------------------
-    current_time = datetime.now(ZoneInfo('Europe/Kyiv'))
-    #with open(METADATA_FILE, "w", encoding="utf-8") as f:
-    #    json.dump({
-    #        "region": REGION,
-    #        "last_updated": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-    #        "timestamp": current_time.timestamp()
-    #    }, f, indent=2)
-#
-    #log(f"🕒 Оновлено файл → {METADATA_FILE}")
-
+    current_time = datetime.now(TIMEZONE)
+    
+    # У своїй системі парсерів я перейшов на окремий поток для вивантаження на GitHub, 
+    # так як іноді виникають проблеми з одночасним вивантаженням з декількох потоків.
+    # Якщо ви використовуєте тільки один потік, можете розкоментувати код нижче
     # ------------------- GIT -------------------
-    try:
-        log("▶️ git pull --rebase --autostash")
-        subprocess.check_call(["git", "pull", "--rebase", "--autostash"], cwd=REPO_DIR)
-
-        log("▶️ git add .")
-        subprocess.check_call(["git", "add", "."], cwd=REPO_DIR)
-
-        commit_msg = f"{REGION} update {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
-        log(f"▶️ git commit -m '{commit_msg}'")
-
-        if subprocess.run(["git", "diff", "--staged", "--quiet"], cwd=REPO_DIR).returncode != 0:
-            subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=REPO_DIR)
-            log(f"✔️ Коміт: {commit_msg}")
-        else:
-            log("ℹ️ Змін для коміту немає")
-            return
-
-        log("▶️ git push")
-        subprocess.check_call(["git", "push"], cwd=REPO_DIR)
-
-        log("🎉 Дані опубліковано в GitHub")
-
-    except subprocess.CalledProcessError as e:
-        log(f"❌ ПОМИЛКА Git: {e}")
-        raise e
+    #try:
+    #    log("▶️ git pull --rebase --autostash")
+    #    subprocess.check_call(["git", "pull", "--rebase", "--autostash"], cwd=REPO_DIR)
+    #
+    #    log("▶️ git add .")
+    #    subprocess.check_call(["git", "add", "."], cwd=REPO_DIR)
+    #
+    #    commit_msg = f"{REGION} update {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
+    #    log(f"▶️ git commit -m '{commit_msg}'")
+    #
+    #    if subprocess.run(["git", "diff", "--staged", "--quiet"], cwd=REPO_DIR).returncode != 0:
+    #        subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=REPO_DIR)
+    #        log(f"✔️ Коміт: {commit_msg}")
+    #    else:
+    #        log("ℹ️ Змін для коміту немає")
+    #        return
+    #
+    #    log("▶️ git push")
+    #    subprocess.check_call(["git", "push"], cwd=REPO_DIR)
+    #
+    #    log("🎉 Дані опубліковано в GitHub")
+    #
+    #except subprocess.CalledProcessError as e:
+    #    log(f"❌ ПОМИЛКА Git: {e}")
+    #    raise e
 
 
 if __name__ == "__main__":
