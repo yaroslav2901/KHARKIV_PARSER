@@ -14,3 +14,6 @@ REPO_DIR = "/home/yaroslav/bots/OE_OUTAGE_DATA"
 DATA_DIR = os.path.join(REPO_DIR, "data") # папка для json файлів
 IMAGES_DIR = os.path.join(REPO_DIR, f"images/{REGION}") # папка для зображень цього регіону
 LOG_FILE = os.path.join(BASE_DIR, "logs", "full_log.log")
+# -------------------для телеграм------------------
+BOT_PREFIX="KHARKIV_PARSER"
+
