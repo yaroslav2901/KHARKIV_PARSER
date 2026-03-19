@@ -65,7 +65,7 @@ def main():
     
     # ---- ПАРСИНГ TELEGRAM-КАНАЛУ ----
     if args.parse:
-        log("📱 Запускаю парсинг Telegram-каналу Черкаси ОЕ")
+        log("📱 Запускаю парсинг Telegram-каналу")
         try:
             result = asyncio.run(kharkiv_telegram_parser.main())
             
