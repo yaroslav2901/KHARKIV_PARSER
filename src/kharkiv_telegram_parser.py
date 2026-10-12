@@ -5,7 +5,7 @@
 import asyncio
 import re
 import json
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from playwright.async_api import async_playwright
 import os
@@ -23,9 +23,23 @@ os.makedirs("out", exist_ok=True)
 # Ключові слова для пошуку постів з графіками
 KEYWORDS = [
     "графіки погодинних відключень",
+    "графік погодинних відключень",
+    "оновлений графік",
     "ГПВ",
     "години відсутності електропостачання",
-    "будуть діяти графіки"
+    "будуть діяти графіки",
+]
+
+MONTHS = {
+    'січня': '01', 'лютого': '02', 'березня': '03', 'квітня': '04',
+    'травня': '05', 'червня': '06', 'липня': '07', 'серпня': '08',
+    'вересня': '09', 'жовтня': '10', 'листопада': '11', 'грудня': '12'
+}
+MONTHS_RE = '|'.join(MONTHS.keys())
+
+DAYS_OF_WEEK = [
+    'понеділок', 'вівторок', 'середу', 'четвер', "п'ятницю", 'пʼятницю', 'суботу', 'неділю',
+    'понеділка', 'вівторка', 'середи', 'четверга', "п'ятниці", 'пʼятниці', 'суботи', 'неділі'
 ]
 
 
@@ -51,10 +65,11 @@ def is_schedule_post(text: str) -> bool:
 
 
 async def fetch_posts() -> list:
-    """Завантажує пости з Telegram та фільтрує їх за ключовими словами"""
+    """Завантажує пости з Telegram та фільтрує їх за ключовими словами.
+    Пости повертаються у хронологічному порядку (старі -> нові)."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=True, 
+            headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -66,54 +81,50 @@ async def fetch_posts() -> list:
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
-        
+
         try:
             log(f"🌐 Завантажую {URL}...")
             await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_selector(".tgme_widget_message", timeout=30000)
-            
+
             # Чекаємо додатково для рендерингу контенту
             await page.wait_for_timeout(3000)
-            
-            # Знаходимо всі пости
+
             posts = await page.query_selector_all(".tgme_widget_message")
             log(f"✔️ Знайдено {len(posts)} постів на сторінці")
-            
+
             filtered_posts = []
-            
+
             for post in posts:
                 try:
-                    # Отримуємо текст поста
                     text_element = await post.query_selector(".tgme_widget_message_text")
                     if not text_element:
                         continue
-                    
+
                     post_text = await text_element.inner_text()
-                    
-                    # Перевіряємо чи це пост з графіком
+
                     if not is_schedule_post(post_text):
                         continue
-                    
-                    # Отримуємо дату поста
+
                     date_element = await post.query_selector(".tgme_widget_message_date time")
                     post_date_str = None
                     if date_element:
                         post_date_str = await date_element.get_attribute("datetime")
-                    
+
                     filtered_posts.append({
                         'text': post_text,
                         'date': post_date_str
                     })
-                    
+
                 except Exception as e:
                     log(f"⚠️ Помилка обробки поста: {e}")
                     continue
-            
+
             log(f"✔️ Знайдено {len(filtered_posts)} постів з графіками")
-            
+
         finally:
             await browser.close()
-            
+
         return filtered_posts
 
 
@@ -121,7 +132,7 @@ def put_interval(result: dict, group_id: str, t1: float, t2: float) -> None:
     # Зсув на +1 годину
     t1 += 1.0
     t2 += 1.0
-    
+
     for hour in range(1, 25):
         h_start = float(hour)
         h_mid = h_start + 0.5
@@ -143,128 +154,118 @@ def put_interval(result: dict, group_id: str, t1: float, t2: float) -> None:
             result[group_id][key] = "second"
 
 
-def extract_date_from_post(text: str, debug: bool = False) -> str:
-    """Витягує дату з тексту поста"""
-    months = {
-        'січня': '01', 'лютого': '02', 'березня': '03', 'квітня': '04',
-        'травня': '05', 'червня': '06', 'липня': '07', 'серпня': '08',
-        'вересня': '09', 'жовтня': '10', 'листопада': '11', 'грудня': '12'
-    }
-    
-    # Спроба 1: Шукаємо "у [день_тижня], [число] [місяць]"
-    # Використовуємо [\w']+ щоб захопити апостроф у п'ятницю
-    date_pattern_with_day = r'у\s+([\wʼ\']+),\s+(\d{1,2})\s+(' + '|'.join(months.keys()) + r')'
-    
-    matches = list(re.finditer(date_pattern_with_day, text, re.IGNORECASE))
-    
-    if debug and matches:
-        log(f"   🔍 Знайдено {len(matches)} збігів з днем тижня")
-    
-    for idx, match in enumerate(matches, 1):
+def build_date_str(day_num: str, month_name: str) -> str | None:
+    """Формує дату DD.MM.YYYY з урахуванням переходу через новий рік."""
+    month = MONTHS.get(month_name.lower())
+    if not month:
+        return None
+
+    now = datetime.now(TZ)
+    year = now.year
+    month_int = int(month)
+
+    # Грудень -> січень і навпаки
+    if now.month == 12 and month_int == 1:
+        year += 1
+    elif now.month == 1 and month_int == 12:
+        year -= 1
+
+    return f"{day_num.zfill(2)}.{month}.{year}"
+
+
+def extract_date_from_post(text: str, debug: bool = False) -> str | None:
+    """Витягує дату з тексту поста.
+
+    Пріоритети:
+      1. "у [день тижня], [число] [місяць]"  (старий формат)
+      2. "на [число] [місяць]"               (оновлені графіки)
+      3. будь-яке "[число] [місяць]"
+    """
+    # Спроба 1: "у вівторок, 13 жовтня"
+    pattern_with_day = r"у\s+([\wʼ']+),\s+(\d{1,2})\s+(" + MONTHS_RE + r")"
+    for match in re.finditer(pattern_with_day, text, re.IGNORECASE):
         day_of_week = match.group(1).lower()
-        day_num = match.group(2)
-        month_name = match.group(3).lower()
-        
-        if debug:
-            log(f"   📍 Збіг {idx}: 'у {day_of_week}, {day_num} {month_name}'")
-        
-        # Перевіряємо що це дійсно день тижня (різні відмінки)
-        days_of_week = [
-            'понеділок', 'вівторок', 'середу', 'четвер', 'п\'ятницю', 'пʼятницю', 'суботу', 'неділю',
-            'понеділка', 'вівторка', 'середи', 'четверга', 'п\'ятниці', 'пʼятниці', 'суботи', 'неділі'
-        ]
-        
-        if day_of_week in days_of_week:
-            if debug:
-                log(f"   ✅ '{day_of_week}' - це день тижня!")
-            
-            day = day_num.zfill(2)
-            month = months.get(month_name)
-            
-            if month:
-                date_str = f"{day}.{month}.{datetime.now(TZ).year}"
+        if day_of_week in DAYS_OF_WEEK:
+            date_str = build_date_str(match.group(2), match.group(3))
+            if date_str:
+                if debug:
+                    log(f"   ✅ Дата (з днем тижня): {date_str}")
                 return date_str
-        else:
+
+    # Спроба 2: "на 13 жовтня"
+    match = re.search(r"\bна\s+(\d{1,2})\s+(" + MONTHS_RE + r")", text, re.IGNORECASE)
+    if match:
+        date_str = build_date_str(match.group(1), match.group(2))
+        if date_str:
             if debug:
-                log(f"   ❌ '{day_of_week}' не є днем тижня")
-    
-    # Спроба 2: Шукаємо просто "[число] [місяць]" без дня тижня
-    date_pattern_simple = r'(\d{1,2})\s+(' + '|'.join(months.keys()) + r')'
-    
-    matches_simple = list(re.finditer(date_pattern_simple, text, re.IGNORECASE))
-    
-    if debug and matches_simple:
-        log(f"   🔍 Знайдено {len(matches_simple)} збігів без дня тижня")
-    
-    for idx, match in enumerate(matches_simple, 1):
-        day_num = match.group(1)
-        month_name = match.group(2).lower()
-        
-        if debug:
-            log(f"   📍 Збіг {idx}: '{day_num} {month_name}'")
-        
-        day = day_num.zfill(2)
-        month = months.get(month_name)
-        
-        if month:
-            date_str = f"{day}.{month}.{datetime.now(TZ).year}"
-            if debug:
-                log(f"   ✅ Знайдено дату: {date_str}")
+                log(f"   ✅ Дата (за шаблоном 'на'): {date_str}")
             return date_str
-    
+
+    # Спроба 3: просто "[число] [місяць]"
+    match = re.search(r"(\d{1,2})\s+(" + MONTHS_RE + r")", text, re.IGNORECASE)
+    if match:
+        date_str = build_date_str(match.group(1), match.group(2))
+        if date_str:
+            if debug:
+                log(f"   ✅ Дата (проста): {date_str}")
+            return date_str
+
     return None
 
 
 def parse_schedule_from_text(text: str) -> dict:
-    """Парсить графік відключень з тексту"""
+    """Парсить графік відключень з тексту.
+
+    Підтримує обидва формати:
+      - старий: із заголовком "Години відсутності електропостачання"
+      - оновлений: одразу список "1.1 19:00-22:00" без заголовка
+    """
     result = {}
-    
-    # Шукаємо текст після "Години відсутності електропостачання"
-    schedule_start = re.search(r'Години\s+відсутності\s+електропостачання', text, re.IGNORECASE)
-    if not schedule_start:
+
+    # Починаємо з першого рядка формату "1.1 ..." (заголовок необов'язковий)
+    first_group = re.search(r'(?m)^\s*\d\.\d\s+\S', text)
+    if not first_group:
         return result
-    
-    text = text[schedule_start.end():]
-    
-    # Обрізаємо до кінця графіків
-    cutoff = re.search(r'(Перелік адрес|ДЛЯ ПРОМИСЛОВОСТІ|⚠️|Ситуація в енергосистемі)', text, re.IGNORECASE)
+    text = text[first_group.start():]
+
+    # Обрізаємо хвіст (адреси, примітки тощо)
+    cutoff = re.search(
+        r'(Перелік адрес|ДЛЯ ПРОМИСЛОВОСТІ|⚠️|Ситуація в енергосистемі)',
+        text,
+        re.IGNORECASE
+    )
     if cutoff:
         text = text[:cutoff.start()]
-    
-    lines = text.split('\n')
-    for line in lines:
+
+    for line in text.split('\n'):
         line = line.strip()
-        
-        # Шукаємо формат "1.1 00:00-01:30; 06:00-08:00"
+
+        # Формат "1.1 00:00-01:30; 06:00-08:00" або "5.1 не вимикається"
         match = re.match(r'(\d)\.(\d)\s+(.+)', line)
         if not match:
             continue
-            
-        group_num = f"{match.group(1)}.{match.group(2)}"
-        group_id = "GPV" + group_num
+
+        group_id = f"GPV{match.group(1)}.{match.group(2)}"
         text_content = match.group(3)
-        
+
         if group_id not in result:
             result[group_id] = {str(h): "yes" for h in range(1, 25)}
 
-        # Шукаємо інтервали відключень
         intervals = re.findall(r'(\d{1,2}:\d{2})\s*[-–—]\s*(\d{1,2}:\d{2})', text_content)
-        
+
         for t1_str, t2_str in intervals:
             try:
-                t1 = time_to_hour(t1_str)
-                t2 = time_to_hour(t2_str)
-                put_interval(result, group_id, t1, t2)
-            except:
+                put_interval(result, group_id, time_to_hour(t1_str), time_to_hour(t2_str))
+            except Exception:
                 continue
-    
+
     return result
 
 
 async def main():
     log("⏳ Завантажую Telegram-канал...")
     posts = await fetch_posts()
-    
+
     if not posts:
         log("❌ Не знайдено постів з графіками")
         return False
@@ -277,55 +278,45 @@ async def main():
     results_for_all_dates = {}
     processed_dates = set()
 
-    log(f"🔍 Обробка {len(posts)} постів...")
-    
-    for idx, post in enumerate(posts, 1):
+    log(f"🔍 Обробка {len(posts)} постів (від найновішого до найстарішого)...")
+
+    # ВАЖЛИВО: йдемо від нових до старих, щоб для кожної дати
+    # брався найсвіжіший (оновлений) графік, а старі пропускалися.
+    total = len(posts)
+    for order, post in enumerate(reversed(posts), 1):
+        idx = total - order + 1  # номер поста на сторінці (для логів)
         try:
-            # Витягуємо дату з тексту (з debug для останніх постів)
-            debug = (idx >= 10)
-            date_str = extract_date_from_post(post['text'], debug=debug)
-            
+            date_str = extract_date_from_post(post['text'])
+
             if not date_str:
-                # Debug: показуємо перші 300 символів тексту поста
-                if idx >= 10:  # Тільки для останніх постів
-                    log(f"📄 Пост {idx}: не знайдено дати в тексті")
-                    log(f"   Початок тексту: {post['text'][:300]}")
-                else:
-                    log(f"📄 Пост {idx}: не знайдено дати в тексті")
+                log(f"📄 Пост {idx}: не знайдено дати в тексті")
+                log(f"   Початок тексту: {post['text'][:200]!r}")
                 continue
-            
-            # Пропускаємо якщо не today/tomorrow
+
             if date_str not in (today_str, tomorrow_str):
                 log(f"⏭️ Пост {idx}: {date_str} (не сьогодні/завтра)")
                 continue
-            
-            # Пропускаємо якщо вже оброблено
+
             if date_str in processed_dates:
-                log(f"ℹ️ Пост {idx}: {date_str} — вже оброблено")
+                log(f"ℹ️ Пост {idx}: {date_str} — вже оброблено новішим постом")
                 continue
-            
+
             log(f"📅 Пост {idx}: обробляю графік для {date_str}")
-            
-            # Парсимо графік
+
             result = parse_schedule_from_text(post['text'])
-            
+
             if not result:
                 log(f"⚠️ Пост {idx}: не знайдено графіків у тексті")
                 continue
-            
-            # Час оновлення - беремо поточний час
-            current_time = datetime.now(TZ).strftime("%H:%M")
-            log(f"🕒 Час оновлення: {current_time}")
-            
-            # Створюємо timestamp
+
             day_int, month_int, year_int = map(int, date_str.split("."))
             date_dt = datetime(year_int, month_int, day_int, tzinfo=TZ)
             date_ts = int(date_dt.timestamp())
-            
+
             results_for_all_dates[str(date_ts)] = result
             processed_dates.add(date_str)
             log(f"✅ Додано графік для {date_str}: {len(result)} груп")
-            
+
         except Exception as e:
             log(f"❌ Помилка обробки поста {idx}: {e}")
             continue
@@ -336,23 +327,23 @@ async def main():
 
     # Перевіряємо DIFF
     if os.path.exists(OUTPUT_FILE):
-        with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
-            old_json = json.load(f)
-        old_data = old_json.get("fact", {}).get("data", {})
+        try:
+            with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+                old_json = json.load(f)
+            old_data = old_json.get("fact", {}).get("data", {})
 
-        if json.dumps(old_data, sort_keys=True) == json.dumps(results_for_all_dates, sort_keys=True):
-            log("ℹ️ Дані не змінилися — JSON не оновлюємо")
-            return False
+            if json.dumps(old_data, sort_keys=True) == json.dumps(results_for_all_dates, sort_keys=True):
+                log("ℹ️ Дані не змінилися — JSON не оновлюємо")
+                return False
+        except Exception as e:
+            log(f"⚠️ Не вдалося прочитати старий JSON ({e}) — перезаписую")
 
-    # Встановлюємо поточну дату і час оновлення
     update_formatted = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
     log(f"🕑 Фінальне оновлення: {update_formatted}")
 
     # Сортуємо дати від меншої до більшої
-    sorted_results = dict(sorted(results_for_all_dates.items(), key=lambda x: int(x[0])))
-    results_for_all_dates = sorted_results
+    results_for_all_dates = dict(sorted(results_for_all_dates.items(), key=lambda x: int(x[0])))
 
-    # Формуємо JSON
     new_json = {
         "regionId": "Kharkiv",
         "lastUpdated": datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
@@ -376,7 +367,6 @@ async def main():
         }
     }
 
-    # Записуємо JSON
     log(f"💾 Записую JSON → {OUTPUT_FILE}")
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(new_json, f, ensure_ascii=False, indent=2)
